@@ -1,6 +1,8 @@
 # Passing 배치 문서 수집기
 
-Windows 환경에서 **상세페이지 URL만 입력하면** 자동으로 참고자료를 수집하는 배치 모드 시스템입니다.
+Windows 환경에서 **상세페이지 URL만 입력하면** 자동으로 사이드 영역의 참고자료를 수집하는 배치 모드 시스템입니다.
+
+**핵심 특징**: 로그인 없이 내 세션으로 열고, 동시성 제한(동시 2개, QPS 2), 타임아웃 120초, 1회 재시도로 예의를 지키며 수집합니다.
 
 ## 📋 사용법 (간단 3단계)
 
@@ -22,10 +24,14 @@ CHROME_PROFILE=C:\Users\사용자명\AppData\Local\Google\Chrome\User Data\Defau
 # 또는 쿠키 파일 사용
 COOKIE_TANK=cookies.json
 
-# 기타 설정
-HEADLESS=true
-HOOK_MS=600
-LOG_LEVEL=INFO
+# 동시성 및 속도 제한
+CONCURRENCY=2
+QPS=2
+TIMEOUT_MS=120000
+
+# 수집 설정
+MAX_ITEMS=16
+CODES=AP,REG,BLD,ZON,RS,TEN,RTR,NT
 ```
 
 ### 3. 실행
@@ -33,7 +39,9 @@ LOG_LEVEL=INFO
 run.bat
 ```
 
-끝! `out/` 폴더에 사건별로 정리된 문서들과 `MANIFEST.json`이 생성됩니다.
+끝! `out/` 폴더에 사건별로 정리된 문서들과 `MANIFEST.json`이 생성됩니다. 
+
+**실패한 URL들은 `urls.failed.txt`에 별도 기록되며, 재실행 시 중복 저장 없이 안전하게 처리됩니다(idempotent).**
 
 ## 📁 출력 구조
 
@@ -110,7 +118,6 @@ run.bat --log-level DEBUG
 
 ### 1. 필수 소프트웨어
 - **Node.js LTS** (https://nodejs.org)
-- **Git** (선택사항)
 
 ### 2. 자동 설치
 ```cmd
@@ -118,10 +125,13 @@ run.bat --log-level DEBUG
 npm run setup
 ```
 
-### 3. 수동 설치
+### 3. 스모크 테스트 (권장)
 ```cmd
-npm install
-npx playwright install chromium
+# 단위 테스트 및 기본 검증
+npm test
+
+# DRY RUN 테스트
+npm run dev -- --urls ./urls.txt.example --dry-run
 ```
 
 ## 🧩 코드 분류 시스템

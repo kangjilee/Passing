@@ -2,24 +2,29 @@
   "name": "passing-batch-collector",
   "version": "1.0.0",
   "description": "Batch mode document collector using Playwright",
-  "main": "src/batch.ts",
+  "main": "src/index.ts",
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/batch.js",
-    "dev": "ts-node src/batch.ts",
-    "install-playwright": "npx playwright install chromium",
-    "setup": "npm install && npm run install-playwright"
+    "setup": "npm i && npx playwright install chromium",
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "playwright": "^1.40.0",
     "fs-extra": "^11.1.1",
-    "dotenv": "^16.3.1"
+    "dotenv": "^16.3.1",
+    "minimist": "^1.2.8",
+    "crypto": "^1.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/fs-extra": "^11.0.4",
+    "@types/minimist": "^1.2.5",
     "typescript": "^5.0.0",
-    "ts-node": "^10.9.0"
+    "tsx": "^4.0.0",
+    "vitest": "^1.0.0"
   },
   "keywords": ["batch", "scraping", "documents", "auction"],
   "author": "",

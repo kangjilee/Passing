@@ -4,10 +4,6 @@ node_modules/
 # Build outputs
 dist/
 
-# Logs
-logs/
-*.log
-
 # Output files
 out/
 
@@ -16,9 +12,17 @@ out/
 
 # URLs (may contain sensitive information)
 urls.txt
+urls.failed.txt
 
 # Cookie files
 cookies.json
+
+# Test files
+test-temp/
+
+# Logs
+logs/
+*.log
 
 # OS generated files
 .DS_Store
@@ -31,3 +35,11 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Coverage reports
+coverage/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/

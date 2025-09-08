@@ -29,8 +29,8 @@ if not exist "node_modules" (
     )
 )
 
-:: TypeScript 빌드
-if not exist "dist" (
+:: TypeScript 빌드 (선택사항 - tsx로 직접 실행 가능)
+if "%1"=="--build" (
     echo [정보] TypeScript를 빌드합니다...
     call npm run build
     if errorlevel 1 (
@@ -38,6 +38,7 @@ if not exist "dist" (
         pause
         exit /b 1
     )
+    shift
 )
 
 :: URLs 파일 확인
@@ -122,7 +123,11 @@ echo.
 echo [정보] 배치 수집기를 시작합니다...
 echo ==========================================
 
-node dist\batch.js !ARGS!
+if exist "dist\index.js" (
+    node dist\index.js !ARGS!
+) else (
+    npm run dev -- !ARGS!
+)
 
 set EXIT_CODE=%errorlevel%
 

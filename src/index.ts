@@ -26,7 +26,6 @@ interface Config {
 function parseArgs(): Config {
   const argv = minimist(process.argv.slice(2), {
     string: ['urls', 'out-dir', 'log-level', 'codes', 'chrome-profile', 'cookie-tank'],
-    number: ['max-items', 'concurrency', 'qps', 'timeout-ms'],
     boolean: ['dry-run', 'headless', 'help'],
     alias: {
       h: 'help',
@@ -44,7 +43,7 @@ function parseArgs(): Config {
       headless: process.env.HEADLESS !== 'false',
       'log-level': process.env.LOG_LEVEL || 'info',
       'max-items': parseInt(process.env.MAX_ITEMS || '16'),
-      codes: process.env.CODES || 'AP,REG,BLD,ZON,RS,TEN,RTR,NT',
+      codes: process.env.CODES || 'AP,REG,BLD,ZON,RS,TEN,RTR,NT,NOI,IMG',
       'chrome-profile': process.env.CHROME_PROFILE,
       'cookie-tank': process.env.COOKIE_TANK,
       concurrency: parseInt(process.env.CONCURRENCY || '2'),
@@ -64,7 +63,7 @@ function parseArgs(): Config {
   --headless                 헤드리스 모드 (기본: true)
   -l, --log-level <level>    로그 레벨: debug|info|warn|error (기본: info)
   -m, --max-items <num>      최대 수집 항목 수 (기본: 16)
-  -c, --codes <codes>        대상 코드 (기본: AP,REG,BLD,ZON,RS,TEN,RTR,NT)
+  -c, --codes <codes>        대상 코드 (기본: AP,REG,BLD,ZON,RS,TEN,RTR,NT,NOI,IMG)
   --chrome-profile <path>    Chrome 프로필 경로
   --cookie-tank <file>       쿠키 파일 경로
   --concurrency <num>        동시 실행 수 (기본: 2)
@@ -132,7 +131,7 @@ async function loadUrls(urlsFile: string): Promise<string[]> {
     return uniqueUrls;
 
   } catch (error) {
-    console.error('❌ URLs 로드 실패:', error.message);
+    console.error('❌ URLs 로드 실패:', error instanceof Error ? error.message : String(error));
     throw error;
   }
 }
@@ -148,8 +147,7 @@ async function main() {
     console.log(`  URLs 파일: ${config.urls}`);
     console.log(`  출력 디렉토리: ${config.outDir}`);
     console.log(`  DRY RUN: ${config.dryRun}`);
-    console.log(`  헤드리스: ${config.headless}`);
-    console.log(`  동시성: ${config.concurrency}, QPS: ${config.qps}`);
+    console.log(`  headless=${config.headless} qps=${config.qps} concurrency=${config.concurrency}`);
     console.log(`  대상 코드: ${config.codes.join(', ')}`);
     console.log('');
 
@@ -163,12 +161,7 @@ async function main() {
       }
     });
 
-    console.log('');
-    console.log('📊 처리 완료:');
-    console.log(`  성공: ${result.success}개`);
-    console.log(`  실패: ${result.failed}개`);
-    console.log(`  총 파일: ${result.totalFiles}개`);
-    console.log(`  누락 코드: ${result.missingCodes.length > 0 ? result.missingCodes.join(', ') : '없음'}`);
+    console.log(`[SUMMARY] ok=${result.success} fail=${result.failed} totalFiles=${result.totalFiles} missing=${result.missingCodes.join(',') || 'none'}`);
     
     if (result.failedUrls.length > 0) {
       const failedFile = path.join(config.outDir, 'urls.failed.txt');
@@ -177,15 +170,12 @@ async function main() {
       console.log(`❌ 실패 URL: ${failedFile}`);
     }
 
-    console.log('=====================================');
-    console.log('✅ 배치 수집 완료');
-
     process.exit(result.failed > 0 ? 1 : 0);
 
   } catch (error) {
-    console.error('💥 치명적 오류:', error.message);
+    console.error('💥 치명적 오류:', error instanceof Error ? error.message : String(error));
     if (process.env.LOG_LEVEL === 'debug') {
-      console.error(error.stack);
+      console.error(error instanceof Error ? error.stack : error);
     }
     process.exit(1);
   }

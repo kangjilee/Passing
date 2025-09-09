@@ -1,13 +1,16 @@
 import { writeFile, ensureDir } from './fs';
 import path from 'path';
+import { Summary } from '../parsers/notice';
 
 export interface Attachment {
+  kind: 'file' | 'link';
   code: string;
   label: string;
   url: string;
-  path: string;
-  hash: string;
-  size: number;
+  path?: string;
+  size?: number;
+  hash?: string;
+  ext?: string;
   success: boolean;
   error?: string;
 }
@@ -19,16 +22,18 @@ export interface ManifestData {
   attachments: Attachment[];
   missing: string[];
   stats: {
-    total: number;
-    success: number;
-    failed: number;
+    ok: number;
+    fail: number;
+    skipped: number;
+    retries: number;
+    totalFiles: number;
     totalSize: number;
     codes: string[];
   };
-  meta: {
-    timestamp: string;
-    version: string;
-  };
+  startedAt: string;
+  endedAt: string;
+  log: string[];
+  summary?: Summary;
 }
 
 export class Manifest {
@@ -45,16 +50,18 @@ export class Manifest {
       attachments: [],
       missing: [],
       stats: {
-        total: 0,
-        success: 0,
-        failed: 0,
+        ok: 0,
+        fail: 0,
+        skipped: 0,
+        retries: 0,
+        totalFiles: 0,
         totalSize: 0,
         codes: []
       },
-      meta: {
-        timestamp: new Date().toISOString(),
-        version: '1.0.0'
-      }
+      startedAt: new Date().toISOString(),
+      endedAt: '',
+      log: [],
+      summary: undefined
     };
   }
 
@@ -63,19 +70,36 @@ export class Manifest {
     this.updateStats();
   }
 
+  addLog(message: string): void {
+    this.data.log.push(`[${new Date().toISOString()}] ${message}`);
+  }
+
+  setSummary(summary: Summary): void {
+    this.data.summary = summary;
+  }
+
+  finish(): void {
+    this.data.endedAt = new Date().toISOString();
+  }
+
   private updateStats(): void {
-    const successful = this.data.attachments.filter(a => a.success);
+    const files = this.data.attachments.filter(a => a.kind === 'file');
+    const successful = files.filter(a => a.success);
+    const failed = files.filter(a => !a.success);
+    const links = this.data.attachments.filter(a => a.kind === 'link');
     const codes = new Set(successful.map(a => a.code));
     
     this.data.stats = {
-      total: this.data.attachments.length,
-      success: successful.length,
-      failed: this.data.attachments.length - successful.length,
-      totalSize: successful.reduce((sum, a) => sum + a.size, 0),
+      ok: successful.length,
+      fail: failed.length,
+      skipped: links.length, // Links are skipped for download
+      retries: 0, // Can be updated externally
+      totalFiles: files.length,
+      totalSize: successful.reduce((sum, a) => sum + (a.size || 0), 0),
       codes: Array.from(codes).sort()
     };
 
-    // 누락된 필수 코드 계산
+    // 누락된 필수 코드 계산 (file 종류만)
     this.data.missing = Array.from(this.requiredCodes)
       .filter(code => !codes.has(code))
       .sort();
@@ -104,11 +128,12 @@ export class Manifest {
   }
 
   getSummary(): string {
-    const { total, success, failed } = this.data.stats;
+    const { ok, fail, skipped } = this.data.stats;
+    const total = ok + fail;
     const missingText = this.data.missing.length > 0 
       ? ` (누락: ${this.data.missing.join(', ')})`
       : '';
     
-    return `${success}/${total} 성공, ${failed} 실패${missingText}`;
+    return `${ok}/${total} 성공, ${fail} 실패, ${skipped} 링크${missingText}`;
   }
 }

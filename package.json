@@ -9,7 +9,9 @@
     "build": "tsc -p .",
     "start": "node dist/index.js",
     "typecheck": "tsc -p . --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "auth:save": "playwright open --save-storage=cookies.json https://www.tankauction.com/",
+    "auth:test": "playwright open --load-storage=cookies.json https://www.tankauction.com/"
   },
   "dependencies": {
     "playwright": "^1.40.0",

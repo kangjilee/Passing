@@ -1,6 +1,10 @@
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import { slugify, createCasePrefix, createSafeFilename } from '../utils/slug';
 import { ensureDir } from '../utils/fs';
+import { openContext } from '../session';
+import { clickResolveAndSaveV2 } from '../utils/downloader';
+import fs from 'fs';
+import path from 'path';
 
 export interface VisitResult {
   prefix: string;
@@ -17,6 +21,7 @@ export interface LinkCandidate {
   label: string;
   href: string;
   element: any; // Playwright ElementHandle
+  kind?: 'file' | 'link'; // file = download, link = metadata only
 }
 
 export interface ResolvedTarget {
@@ -26,45 +31,33 @@ export interface ResolvedTarget {
   error?: string;
 }
 
+export interface CollectionResult {
+  anchors: LinkCandidate[];
+  debugDir: string;
+  softEmpty: boolean;
+}
+
+export async function debugDump(page: Page, dir: string, tag: string): Promise<void> {
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    await page.screenshot({ path: path.join(dir, `${tag}.png`), fullPage: true }).catch(() => {});
+    const html = await page.content().catch(() => '');
+    fs.writeFileSync(path.join(dir, `${tag}.html`), html, 'utf8');
+  } catch (error) {
+    console.warn(`Debug dump failed for ${tag}:`, error instanceof Error ? error.message : String(error));
+  }
+}
+
 export class TankAuctionVendor {
   private context?: BrowserContext;
   private browser?: Browser;
 
   async initializeSession(chromeProfile?: string, cookieTank?: string, headless: boolean = true): Promise<BrowserContext> {
     try {
-      // Chrome 프로필 우선
-      if (chromeProfile) {
-        this.browser = await chromium.launchPersistentContext(chromeProfile, {
-          headless,
-          viewport: { width: 1920, height: 1080 },
-          locale: 'ko-KR'
-        });
-        this.context = this.browser;
-      } else {
-        // 일반 브라우저 + 쿠키 파일
-        this.browser = await chromium.launch({ headless });
-        this.context = await this.browser.newContext({
-          viewport: { width: 1920, height: 1080 },
-          locale: 'ko-KR'
-        });
-
-        // 쿠키 로드
-        if (cookieTank) {
-          try {
-            const fs = require('fs-extra');
-            if (await fs.pathExists(cookieTank)) {
-              const cookies = JSON.parse(await fs.readFile(cookieTank, 'utf8'));
-              await this.context.addCookies(cookies);
-            }
-          } catch (error) {
-            console.warn('쿠키 로드 실패:', error.message);
-          }
-        }
-      }
-
+      this.context = await openContext();
       return this.context;
     } catch (error) {
-      throw new Error(`세션 초기화 실패: ${error.message}`);
+      throw new Error(`세션 초기화 실패: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -155,66 +148,10 @@ export class TankAuctionVendor {
 
       const prefix = createCasePrefix(caseNo, round);
 
-      // 사이드 영역 찾기 (참고자료/지도자료/기타참고자료)
-      const sectionSelectors = [
-        'text*="참고자료"',
-        'text*="자료"', 
-        'text*="첨부"',
-        'text*="다운로드"',
-        'text*="문서함"',
-        'text*="지도자료"',
-        'text*="지도"',
-        'text*="위치"',
-        'text*="기타참고자료"',
-        'text*="기타"',
-        'text*="보조"'
-      ];
-
-      let sectionHandle = null;
-      for (const selector of sectionSelectors) {
-        try {
-          const element = page.locator(selector).first();
-          if (await element.isVisible({ timeout: 2000 })) {
-            // 부모 컨테이너 찾기
-            const parent = element.locator('xpath=ancestor-or-self::*[contains(@class, "section") or contains(@class, "panel") or contains(@class, "box") or self::table or self::div][1]');
-            if (await parent.count() > 0) {
-              sectionHandle = parent.first();
-              break;
-            } else {
-              sectionHandle = element;
-              break;
-            }
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      if (!sectionHandle) {
-        throw new Error('참고자료 섹션을 찾을 수 없습니다.');
-      }
-
-      // 섹션이 접혀있으면 펼치기
-      try {
-        const toggleButtons = sectionHandle.locator('button, a, [onclick], [class*="toggle"], [class*="expand"]');
-        const count = await toggleButtons.count();
-        for (let i = 0; i < count; i++) {
-          const btn = toggleButtons.nth(i);
-          const text = await btn.textContent() || '';
-          if (text.includes('▼') || text.includes('▲') || text.includes('펼치') || text.includes('더보기')) {
-            await btn.click({ timeout: 2000 });
-            await page.waitForTimeout(1000);
-            break;
-          }
-        }
-      } catch {
-        // 토글 실패는 무시
-      }
-
       return {
         prefix,
         title: title.trim(),
-        sectionHandle,
+        sectionHandle: null, // No longer needed - handled by collectLinksV2
         caseNo,
         round,
         success: true
@@ -226,7 +163,7 @@ export class TankAuctionVendor {
         title: '',
         sectionHandle: null,
         success: false,
-        error: error.message
+        error: error instanceof Error ? error.message : String(error)
       };
     } finally {
       await page.close();
@@ -277,118 +214,390 @@ export class TankAuctionVendor {
       }
 
     } catch (error) {
-      console.warn('링크 수집 실패:', error.message);
+      console.warn('링크 수집 실패:', error instanceof Error ? error.message : String(error));
     }
 
     return candidates.slice(0, maxItems);
   }
 
+  async collectLinksV2(page: Page, prefix: string, outDir: string): Promise<CollectionResult> {
+    const dbg = path.join(outDir, '_debug', prefix.replace(/[^\w.-]/g, '_'));
+    
+    try {
+      await fs.promises.mkdir(dbg, { recursive: true });
+    } catch (error) {
+      console.warn('Failed to create debug directory:', error instanceof Error ? error.message : String(error));
+    }
+
+    // 0) 안정화 대기
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+    await page.waitForTimeout(800);
+
+    // 1) 섹션 후보(동의어 포함)
+    const sectionSelectors = [
+      'xpath=//aside//*[contains(text(),"참고자료")]/ancestor::*[self::aside or self::div or self::section][1]',
+      'xpath=//*[contains(@class,"side") and .//*[contains(text(),"참고자료")]]',
+      'xpath=//section[.//*[contains(text(),"참고자료")]]',
+      'xpath=//*[contains(text(),"참고자료")]/ancestor::*[self::aside or self::div or self::section][1]',
+      // 지도/기타도 허용
+      'xpath=//aside//*[contains(text(),"지도자료") or contains(text(),"기타")]/ancestor::*[self::aside or self::div or self::section][1]'
+    ];
+
+    let section = null;
+    for (const sel of sectionSelectors) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.count().catch(() => 0)) {
+          section = loc;
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!section) {
+      // 탭/아코디언 펼침 시도 (자주 쓰는 토글 패턴)
+      const toggles = page.locator('button, a').filter({ hasText: /(참고자료|첨부|다운로드|문서함|지도자료|기타)/ });
+      try {
+        if (await toggles.count().catch(() => 0)) {
+          await toggles.first().click({ timeout: 3000 });
+          await page.waitForTimeout(500);
+          for (const sel of sectionSelectors) {
+            const loc = page.locator(sel).first();
+            if (await loc.count().catch(() => 0)) {
+              section = loc;
+              break;
+            }
+          }
+        }
+      } catch {
+        // Toggle click failed, continue
+      }
+    }
+
+    await debugDump(page, dbg, '01_detail');
+
+    // 2) 섹션 내부 앵커 수집
+    let anchors: LinkCandidate[] = [];
+    if (section) {
+      try {
+        const links = await section.locator('a[href]').all();
+        for (const link of links) {
+          const href = await link.getAttribute('href').catch(() => null);
+          const label = (await link.innerText().catch(() => '')).trim();
+          if (!href) continue;
+          anchors.push({ href, label, element: link });
+        }
+      } catch (error) {
+        console.warn('Section link collection failed:', error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    // 3) 폴백: 전 페이지 스캔(필요 라벨만)
+    if (anchors.length === 0) {
+      try {
+        const links = await page.locator('a[href]').all();
+        const include = /(감정|평가|재산명세|등기|건축물대장|토지이용|실거래|임차|특약|현황)/;
+        const exclude = /(관심|즐겨찾기|공유|인쇄|담당|문의|복사|스크랩)/;
+        
+        for (const link of links) {
+          const href = await link.getAttribute('href').catch(() => null);
+          const label = (await link.innerText().catch(() => '')).trim();
+          if (!href) continue;
+          if (include.test(label) && !exclude.test(label)) {
+            anchors.push({ href, label, element: link });
+          }
+        }
+      } catch (error) {
+        console.warn('Fallback link collection failed:', error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    // Save debug info
+    try {
+      fs.writeFileSync(path.join(dbg, 'anchors.json'), JSON.stringify(
+        anchors.map(a => ({ href: a.href, label: a.label })), 
+        null, 
+        2
+      ));
+    } catch (error) {
+      console.warn('Failed to save anchors.json:', error instanceof Error ? error.message : String(error));
+    }
+
+    if (anchors.length === 0) {
+      console.warn('[COLLECT] no anchors found → treat as missing, not hard-fail');
+      return { anchors: [], debugDir: dbg, softEmpty: true };
+    }
+    
+    console.log(`[COLLECT] Found ${anchors.length} anchors for ${prefix}`);
+    return { anchors, debugDir: dbg, softEmpty: false };
+  }
+
   filterAndMap(candidates: LinkCandidate[], allowedCodes: string[]): LinkCandidate[] {
-    const codePatterns: Record<string, RegExp> = {
-      'AP': /감정|평가/i,
-      'RS': /재산명세/i,
-      'REG': /등기|건물등기|토지등기/i,
-      'BLD': /건축물대장|층별|표제부/i,
-      'ZON': /토지이용/i,
-      'RTR': /실거래|국토부실거래/i,
-      'TEN': /임차|점유|배당/i,
-      'NT': /특약|유의/i
+    const RX = {
+      include: /(감정|평가|재산명세|처분재산|등기|건축물대장|토지이용|실거래|임차|점유|현황|특약|유의|사진|앨범|이미지|공고|물건상세|안내)/i,
+      exclude: /(관심|즐겨찾기|공유|인쇄|담당|문의|복사|스크랩|다운로드 안내)/i,
+      mapOnly: /(지도|지적편집도|로드뷰|카카오|네이버)/i,
+      portalOnly: /(네이버부동산|KB|국토|통계|부동산플래닛|씨리얼|지역|인구|세대)/i,
+      codeMap: [
+        { rx: /(감정|평가)/i, code: 'AP' },
+        { rx: /(재산명세|처분재산)/i, code: 'RS' },
+        { rx: /(등기)/i, code: 'REG' },
+        { rx: /(건축물대장)/i, code: 'BLD' },
+        { rx: /(토지이용)/i, code: 'ZON' },
+        { rx: /(실거래|거래가|국토)/i, code: 'RTR' },
+        { rx: /(임차|점유|현황표)/i, code: 'TEN' },
+        { rx: /(특약|유의|공지|안내)/i, code: 'NT' },
+        { rx: /(공고|물건상세)/i, code: 'NOI' },
+        { rx: /(사진|앨범|이미지|포토)/i, code: 'IMG' },
+      ]
     };
 
     return candidates
+      .filter(candidate => {
+        // 1) exclude 패턴 제외
+        if (RX.exclude.test(candidate.label)) {
+          return false;
+        }
+        // 2) include 패턴이나 지도/포털 패턴 중 하나는 매치
+        return RX.include.test(candidate.label) || 
+               RX.mapOnly.test(candidate.label) || 
+               RX.portalOnly.test(candidate.label);
+      })
       .map(candidate => {
-        // 코드 분류
-        for (const code of allowedCodes) {
-          const pattern = codePatterns[code];
-          if (pattern && pattern.test(candidate.label)) {
-            return { ...candidate, code };
+        // 분류 로직
+        if (RX.mapOnly.test(candidate.label)) {
+          return { ...candidate, kind: 'link' as const, code: 'MAP' };
+        }
+        
+        if (RX.portalOnly.test(candidate.label)) {
+          return { ...candidate, kind: 'link' as const, code: 'PORTAL' };
+        }
+        
+        // 파일 다운로드 대상 - codeMap으로 분류
+        let code = 'OTH'; // 기본값
+        for (const { rx, code: mappedCode } of RX.codeMap) {
+          if (rx.test(candidate.label)) {
+            code = mappedCode;
+            break;
           }
         }
-        return candidate; // 코드 없이도 유지
+        
+        return { ...candidate, kind: 'file' as const, code };
       })
       .filter(candidate => {
-        // 불필요한 라벨 제외
-        const negativePatterns = [
-          /관심|즐겨찾|분류|추가|수정|삭제/i,
-          /마이페이지|알림|공유|인쇄|문의|담당자/i,
-          /로그인|회원가입|비밀번호/i
-        ];
-        
-        return !negativePatterns.some(pattern => pattern.test(candidate.label));
+        // allowedCodes 체크 (MAP, PORTAL은 항상 허용)
+        return candidate.code === 'MAP' || 
+               candidate.code === 'PORTAL' || 
+               allowedCodes.includes(candidate.code || '');
       });
   }
 
-  async resolveTargets(candidate: LinkCandidate, page: Page): Promise<ResolvedTarget> {
+  async downloadFile(candidate: LinkCandidate, page: Page, saveBase: string): Promise<ResolvedTarget & { path?: string, size?: number, hash?: string, ext?: string }> {
     try {
-      // 절대 URL이면 바로 반환
-      if (candidate.href.startsWith('http') && !candidate.href.includes('javascript:')) {
+      if (!this.context) {
         return {
           finalUrl: candidate.href,
-          success: true
+          success: false,
+          error: 'Browser context not available'
         };
       }
 
-      // 팝업/다운로드/새탭 이벤트 감지
-      let finalUrl = '';
-      let filename = '';
+      // Create a unique selector for the element - use text content match
+      const selectorText = await candidate.element.innerText().catch(() => candidate.label);
+      const anchorSelector = `text="${selectorText}"`;
 
-      const [popup, download, newPage] = await Promise.allSettled([
-        page.waitForEvent('popup', { timeout: 3000 }),
-        page.waitForEvent('download', { timeout: 3000 }),
-        this.context!.waitForEvent('page', { timeout: 3000 })
-      ]);
-
-      // 클릭 실행
-      await candidate.element.click({ timeout: 2000 });
-      await page.waitForTimeout(1000);
-
-      // 다운로드 이벤트 우선
-      if (download.status === 'fulfilled') {
-        finalUrl = download.value.url();
-        filename = download.value.suggestedFilename();
+      // Use V3.3 enhanced downloader with original href parameter preservation
+      const savedPath = await clickResolveAndSaveV2(this.context, page, anchorSelector, saveBase, candidate.code || 'UNK', candidate.href);
+      
+      if (savedPath && fs.existsSync(savedPath)) {
+        const stats = fs.statSync(savedPath);
+        const hash = require('crypto').createHash('md5').update(fs.readFileSync(savedPath)).digest('hex');
+        
+        return {
+          finalUrl: candidate.href,
+          filename: path.basename(savedPath),
+          path: savedPath,
+          size: stats.size,
+          hash: hash,
+          ext: path.extname(savedPath).slice(1),
+          success: true
+        };
+      } else {
+        return {
+          finalUrl: candidate.href,
+          success: false,
+          error: 'No file downloaded - likely HTML/viewer only'
+        };
       }
-      // 팝업 이벤트
-      else if (popup.status === 'fulfilled') {
-        finalUrl = popup.value.url();
-        await popup.value.close();
-      }
-      // 새 탭 이벤트  
-      else if (newPage.status === 'fulfilled') {
-        finalUrl = newPage.value.url();
-        await newPage.value.close();
-      }
-      // URL 변경 감지
-      else {
-        const currentUrl = page.url();
-        if (currentUrl !== candidate.href) {
-          finalUrl = currentUrl;
-        }
-      }
-
-      if (!finalUrl) {
-        throw new Error('URL을 해석할 수 없습니다.');
-      }
-
-      return {
-        finalUrl,
-        filename,
-        success: true
-      };
 
     } catch (error) {
       return {
-        finalUrl: '',
+        finalUrl: candidate.href,
         success: false,
-        error: error.message
+        error: error instanceof Error ? error.message : String(error)
       };
     }
   }
 
   async close(): Promise<void> {
+    if (this.context) {
+      await this.context.close();
+      this.context = undefined;
+    }
     if (this.browser) {
       await this.browser.close();
       this.browser = undefined;
-      this.context = undefined;
+    }
+  }
+
+  async captureNOI(page: Page, prefix: string, outDir: string): Promise<{ paths: string[], success: boolean }> {
+    try {
+      const paths: string[] = [];
+      const baseDir = path.join(outDir, prefix);
+      await fs.promises.mkdir(baseDir, { recursive: true });
+
+      // 1) HTML capture
+      const htmlPath = path.join(baseDir, `${prefix}__NOI_01_notice.html`);
+      const html = await page.content();
+      fs.writeFileSync(htmlPath, html, 'utf8');
+      paths.push(htmlPath);
+
+      // 2) PNG screenshot
+      const pngPath = path.join(baseDir, `${prefix}__NOI_01_notice.png`);
+      await page.screenshot({ 
+        path: pngPath, 
+        fullPage: true,
+        timeout: 10000
+      }).catch(() => {}); // Ignore screenshot failures
+      if (fs.existsSync(pngPath)) {
+        paths.push(pngPath);
+      }
+
+      // 3) PDF capture
+      try {
+        const pdfPath = path.join(baseDir, `${prefix}__NOI_01_notice.pdf`);
+        await page.emulateMedia({ media: 'print' });
+        await page.pdf({ 
+          path: pdfPath, 
+          printBackground: true, 
+          margin: { top: '10mm', bottom: '10mm', left: '8mm', right: '8mm' }
+        }).catch(() => {}); // Ignore PDF failures
+        if (fs.existsSync(pdfPath)) {
+          paths.push(pdfPath);
+        }
+      } catch {
+        // PDF generation not supported in all environments
+      }
+
+      return { paths, success: paths.length > 0 };
+    } catch (error) {
+      console.warn('NOI capture failed:', error instanceof Error ? error.message : String(error));
+      return { paths: [], success: false };
+    }
+  }
+
+  async downloadIMG(page: Page, candidate: LinkCandidate, prefix: string, outDir: string, maxItems: number = 10): Promise<{ paths: string[], success: boolean }> {
+    try {
+      const paths: string[] = [];
+      const baseDir = path.join(outDir, prefix);
+      await fs.promises.mkdir(baseDir, { recursive: true });
+
+      // Try V2 event-based download first
+      const saveBase = path.join(baseDir, `${prefix}__IMG_01_${candidate.label.replace(/[^\w]/g, '_')}`);
+      const selectorText = await candidate.element.innerText().catch(() => candidate.label);
+      const anchorSelector = `text="${selectorText}"`;
+      const savedPath = await clickResolveAndSaveV2(this.context!, page, anchorSelector, saveBase, 'IMG', candidate.href);
+      
+      if (savedPath) {
+        paths.push(savedPath);
+      } else {
+        // If event download failed, try page scanning for images
+        try {
+          // Navigate to image page
+          await candidate.element.click();
+          await page.waitForTimeout(2000);
+
+          // Find image elements
+          const images = await page.locator('img[src]').all();
+          const limitedImages = images.slice(0, Math.min(maxItems, images.length));
+
+          for (let i = 0; i < limitedImages.length; i++) {
+            try {
+              const img = limitedImages[i];
+              const src = await img.getAttribute('src');
+              if (!src || src.startsWith('data:') || src.includes('placeholder')) continue;
+
+              const imgUrl = new URL(src, page.url()).href;
+              
+              // Try to fetch image
+              const response = await page.goto(imgUrl);
+              if (response && response.ok()) {
+                const ct = response.headers()['content-type'] || '';
+                if (/image\/(png|jpeg|jpg|gif|tiff|bmp|webp)/i.test(ct)) {
+                  const buffer = await response.body();
+                  const ext = path.extname(imgUrl).toLowerCase() || '.jpg';
+                  const imgPath = path.join(baseDir, `${prefix}__IMG_${String(i + 1).padStart(2, '0')}_image${ext}`);
+                  
+                  fs.writeFileSync(imgPath, buffer);
+                  paths.push(imgPath);
+                }
+              }
+            } catch {
+              continue; // Skip failed images
+            }
+          }
+        } catch {
+          // Page scanning failed
+        }
+      }
+
+      return { paths, success: paths.length > 0 };
+    } catch (error) {
+      console.warn('IMG download failed:', error instanceof Error ? error.message : String(error));
+      return { paths: [], success: false };
+    }
+  }
+
+  async downloadRTR(page: Page, candidate: LinkCandidate, prefix: string, outDir: string): Promise<{ paths: string[], success: boolean }> {
+    try {
+      const paths: string[] = [];
+      const baseDir = path.join(outDir, prefix);
+      await fs.promises.mkdir(baseDir, { recursive: true });
+
+      // Try V2 event-based download first (CSV/Excel files)
+      const saveBase = path.join(baseDir, `${prefix}__RTR_01_transactions`);
+      const selectorText = await candidate.element.innerText().catch(() => candidate.label);
+      const anchorSelector = `text="${selectorText}"`;
+      const savedPath = await clickResolveAndSaveV2(this.context!, page, anchorSelector, saveBase, 'RTR', candidate.href);
+      
+      if (savedPath) {
+        paths.push(savedPath);
+      } else {
+        // If no file download, try table extraction as CSV
+        try {
+          await candidate.element.click();
+          await page.waitForTimeout(2000);
+
+          const html = await page.content();
+          const { tableToCsv } = require('../parsers/notice');
+          const csv = tableToCsv(html);
+          
+          if (csv && csv.trim()) {
+            const csvPath = path.join(baseDir, `${prefix}__RTR_01_transactions.csv`);
+            fs.writeFileSync(csvPath, csv, 'utf8');
+            paths.push(csvPath);
+          }
+        } catch (error) {
+          console.warn('Table extraction failed:', error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      return { paths, success: paths.length > 0 };
+    } catch (error) {
+      console.warn('RTR download failed:', error instanceof Error ? error.message : String(error));
+      return { paths: [], success: false };
     }
   }
 
